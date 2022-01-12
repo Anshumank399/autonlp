@@ -11,11 +11,11 @@ import requests
 from loguru import logger
 
 from . import config
-from .evaluate import Evaluate
+from .evaluate import Evaluate, format_datasets_task, format_eval_status, get_dataset_splits
 from .languages import SUPPORTED_LANGUAGES
 from .metrics import Metrics
 from .project import Project
-from .tasks import TASKS
+from .tasks import DATASETS_TASKS, TASKS
 from .utils import UnauthenticatedError, http_get, http_post
 
 
@@ -74,14 +74,14 @@ class AutoNLP:
                         self.orgs = conf_json["orgs"]
                         self.token = conf_json["token"]
 
-    def create_project(self, name: str, task: str, language: str, max_models: int):
+    def create_project(self, name: str, task: str, language: str, max_models: int, hub_model: str = None):
         """Create a project and return it"""
         self._login_from_conf()
         task_id = TASKS.get(task)
         if task_id is None:
             raise ValueError(f"❌ Invalid task selected. Please choose one of {TASKS.keys()}")
         language = str(language).strip().lower()
-        if len(language) != 2 or language not in SUPPORTED_LANGUAGES:
+        if language not in SUPPORTED_LANGUAGES:
             raise ValueError("❌ Invalid language selected. Please check supported languages in AutoNLP documentation.")
         if task_id is None:
             raise ValueError(f"❌ Invalid task specified. Please choose one of {list(TASKS.keys())}")
@@ -89,7 +89,11 @@ class AutoNLP:
             "username": self.username,
             "proj_name": name,
             "task": task_id,
-            "config": {"version": 0, "patch": 1, "language": language, "max_models": max_models},
+            "config": {
+                "language": language,
+                "max_models": max_models,
+                "hub_model": hub_model,
+            },
         }
         json_resp = http_post(path="/projects/create", payload=payload, token=self.token).json()
         proj_name = json_resp["proj_name"]
@@ -102,17 +106,35 @@ class AutoNLP:
         self._project.refresh()
         return self._project
 
-    def create_evaluation(self, task: str, dataset: str, model: str, col_mapping: str, split: str, config: str = None):
+    def create_evaluation(
+        self, task: str, dataset: str, model: str, split: str, col_mapping: str = None, config: str = None
+    ):
         self._login_from_conf()
+
+        splits = get_dataset_splits(dataset=dataset, config=config)
+        if split not in splits:
+            raise ValueError(f"❌ Split {split} not found in dataset {dataset}. Available splits: {splits}")
+
+        if task in DATASETS_TASKS:
+            task = format_datasets_task(task, dataset, config)
+            if col_mapping:
+                logger.warning("A task template from `datasets` has been selected. Deleting `col_mapping` ...")
+                col_mapping = None
+        elif col_mapping is None:
+            raise ValueError(
+                f"❌ A column mapping must be provided for task {task}. Please provide a value for `col_mapping`."
+            )
+
         task_id = TASKS.get(task)
         if task_id is None:
             raise ValueError(f"❌ Invalid task selected. Please choose one of {TASKS.keys()}")
 
-        col_mapping = col_mapping.strip().split(",")
         mapping_dict = {}
-        for c_m in col_mapping:
-            k, v = c_m.split(":")
-            mapping_dict[k] = v
+        if col_mapping:
+            col_mapping = col_mapping.strip().split(",")
+            for c_m in col_mapping:
+                k, v = c_m.split(":")
+                mapping_dict[k] = v
 
         payload = {
             "username": self.username,
@@ -127,11 +149,46 @@ class AutoNLP:
         self._eval_proj = Evaluate.from_json_resp(json_resp, token=self.token)
         return self._eval_proj
 
-    def get_project(self, name):
+    def create_benchmark(self, dataset: str, submission: str, submission_id: str, eval_name: str):
+        self._login_from_conf()
+        task_id = 1
+        payload = {
+            "username": self.username,
+            "dataset": dataset,
+            "task": task_id,
+            "model": eval_name,
+            "submission_dataset": submission,
+            "submission_id": submission_id,
+            "col_mapping": {},
+            "split": "test",
+            "config": None,
+        }
+        json_resp = http_post(path="/evaluate/create", payload=payload, token=self.token).json()
+        self._eval_proj = Evaluate.from_json_resp(json_resp, token=self.token)
+        return self._eval_proj
+
+    def get_eval_job_status(self, eval_job_id: int) -> int:
+        self._login_from_conf()
+        json_resp = http_get(path=f"/evaluate/status/{eval_job_id}", token=self.token).json()
+        return json_resp["status"]
+
+    def get_project(self, name: str, is_eval: bool = False):
         """Retrieves a project"""
         self._login_from_conf()
         if self.username is None:
             raise UnauthenticatedError("❌ Credentials not found ! Please login to AutoNLP first.")
+        if is_eval:
+            logger.info(f"☁ Retrieving evaluation project '{name}' from AutoNLP...")
+            try:
+                json_resp = http_get(path=f"/evaluate/status/{name}", token=self.token).json()
+            except requests.exceptions.HTTPError as err:
+                if err.response.status_code == 404:
+                    raise ValueError(
+                        f"❌ Evaluation project '{name}' not found. Please create the project using autonlp evaluate"
+                    )
+                raise
+            return format_eval_status(json_resp)
+
         if self._project is None or self._project.name != name:
             logger.info(f"☁ Retrieving project '{name}' from AutoNLP...")
             try:

@@ -194,6 +194,10 @@ class Project:
 
     def refresh(self):
         """Update information about uploaded files and models attached to the project"""
+        logger.info("🔄 Refreshing project status...")
+        resp = http_get(path=f"/projects/{self.proj_id}", token=self._token)
+        self.status_emoji, self.status = get_project_status(resp.json()["status"])
+
         logger.info("🔄 Refreshing uploaded files information...")
         resp = http_get(path=f"/projects/{self.proj_id}/data", token=self._token)
         json_files = resp.json()
@@ -343,7 +347,9 @@ class Project:
         return cost_estimate
 
     def _clone_dataset_repo(self) -> Repository:
-        local_dataset_dir = os.path.expanduser(f"~/.huggingface/autonlp/projects/{self.dataset_id}")
+        local_dataset_dir = os.path.join(
+            os.path.expanduser("~"), ".huggingface", "autonlp", "projects", self.dataset_id
+        )
         if os.path.exists(local_dataset_dir):
             if os.path.isdir(os.path.join(local_dataset_dir, ".git")):
                 clone_from = None
